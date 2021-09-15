@@ -1,0 +1,304 @@
+
+******************Daily**********************
+cal(d) 1986:1:2
+all 2016:6:6
+open data
+data(format=xls,org=obs)
+tab
+
+**Levels**
+@dfunit(det=trend,method=bic) wti
+@dfunit(det=trend,method=bic) s_p
+@ppunit(det=trend,lags=5) wti
+@ppunit(det=trend,lags=5) s_p
+
+@kpss(det=trend,lags=5) wti
+@kpss(det=trend,lags=5) s_p
+
+
+set oil = 100*(log(wti) - log(wti{1}))
+set sp = 100*(log(s_p) - log(s_p{1}))
+gra 1; # oil
+
+
+**First Differences**
+@dfunit(det=trend,method=bic) oil
+@dfunit(det=trend,method=bic) sp
+@ppunit(det=trend,lags=5) oil
+@ppunit(det=trend,lags=5) sp
+
+@kpss(det=trend,lags=5) oil
+@kpss(det=trend,lags=5) sp
+
+
+spgraph(hfields=1,vfields=4)
+graph(hea="Oil Price") 1 ; # wti
+graph(hea="S&P 500") 1 ; # s_p
+graph(hea="Log Difference in Oil Prices") 1 ; # oil
+graph(hea="Log Difference in the S&P 500") 1 ; # sp
+spgraph(done)
+
+*******Oil - ARCH Errors*************
+
+@lagselect oil
+lin oil / resids; # constant  oil{1 to 8}
+@bic
+cor(qstats,span=4,number=16,dfc=%narma) resids
+@bjident resids
+
+set r2 = resids^2
+lin r2 ; # constant r2{1 2}
+exc ; # r2{1 2}
+cor(qstats,span=4,number=16,dfc=%narma) r2
+@bjident r2
+@archtest(lags=2) resids
+@mcleodli oil
+
+*******S&P - ARCH Errors*************
+
+@lagselect sp
+lin sp / resids; # constant  sp{1 to 2}
+@bic
+cor(qstats,span=4,number=16,dfc=%narma) resids
+@bjident resids
+
+set r2 = resids^2
+lin r2 ; # constant r2{1 2}
+exc ; # r2{1 2}
+cor(qstats,span=4,number=16,dfc=%narma) r2
+@bjident r2
+@archtest(lags=2) resids
+@mcleodli sp
+
+
+@varlagselect(lags=13,det=constant,crit=aic)
+# oil sp
+* The AIC selects 8, while the BIC selects 0, GTOS selects 8
+
+
+***********************oil and stock market********************
+compute n=2
+dec vect[strings] vlabels(n)
+compute vlabels=||"oil","stock market"||
+
+dec symm[series] hhs(2,2)
+
+do i= 1,2
+	do j=1,i
+		set hhs(i,j) / = 0.0
+     end do j
+end do i
+
+com lags = 8
+equation oill oil
+# constant sp{1 to lags} oil{1 to lags} hhs(1,1) hhs(2,2)
+equation spl sp
+# constant sp{1 to lags} oil{1 to lags} hhs(1,1) hhs(2,2)
+group means oill spl
+garch(p=1,q=1,model=means,mvhseries=hhs,rvectors=rv,hmatrices=h,method=bfgs,iters=800,mv=dcc,pmethod=simplex,piters=20) /
+
+
+compute gstart=%regstart(),gend=%regend()
+*
+* Proposal density for the increment in independence chain MH is based
+* upon the covariance matrix from the GARCH estimates. This is a
+* multivariate t with <<nuxx>> degrees of freedom. The scale on FXX and
+* the value for NUXX may need to be adjusted in different applications
+* to get a reasonable acceptance rate.
+*
+compute fxx=.1*%decomp(%xx)
+compute nuxx=10.0
+*
+* Start at the ML estimates
+*
+compute logplast=%logl
+compute blast=%beta
+compute accept=0
+*
+compute nburn=200,nkeep=200
+*
+* This keeps track of the DCC correlations estimates. This is a
+* complicated structure since we have, for each draw, one full series
+* for each off-diagonal. (For simplicity, this is also saving the
+* diagonals, which are, of course, 1's). With a bigger model (longer
+* time series or more variables) or more draws, you could run into
+* memory issues.
+*
+dec symm[series[vect]] dcccorr(n,n)
+do i=1,n
+   do j=1,i
+      gset dcccorr(i,j) gstart gend = %zeros(nkeep,1)
+   end do j
+end do i
+*
+dec series[symm] hlast
+gset hlast gstart gend = h
+*
+infobox(action=define,progress,lower=-nburn,upper=nkeep) "Independence M-H"
+do draw=-nburn,nkeep
+   compute btest=blast+%ranmvt(fxx,nuxx)
+   *
+   * Evaluate the GARCH model at the proposal
+   *
+   com lags = 8
+	equation oill oil
+	# constant sp{1 to lags} oil{1 to lags} hhs(1,1) hhs(2,2)
+	equation spl sp
+	# constant sp{1 to lags} oil{1 to lags} hhs(1,1) hhs(2,2)
+	group means oill spl
+	garch(p=1,q=1,model=means,initial=btest,mvhseries=hhs,rvectors=rv,hmatrices=htest,method=evaluate,iters=800,mv=dcc,pmethod=simplex,piters=20) /
+   compute logptest=%logl
+   *
+   * Carry out the Metropolis test
+   *
+   compute alpha=exp(logptest-logplast)
+   if alpha>1.0.or.%uniform(0.0,1.0)<alpha {
+      compute accept=accept+1
+      compute blast =btest
+      compute logplast=logptest
+      gset hlast gstart gend = htest
+   }
+
+   infobox(current=draw) %strval(100.0*accept/(draw+nburn+1),"##.##")
+   if draw>0 {
+      do i=1,n
+         do j=1,i
+            do t=gstart,gend
+               compute dcccorr(i,j)(t)(draw)=%cvtocorr(hlast(t))(i,j)
+            end do t
+         end do j
+      end do i
+   }
+end do draw
+infobox(action=remove)
+*
+dec vect xcorr(nkeep)
+dec symm[series] lower(n,n) upper(n,n) median(n,n)
+clear(zeros) lower upper median
+*
+* Generate the median and 90% confidence band for the DCC correlations.
+* For this data set, the period to period movement is large enough
+* relative to the spread that the three lines basically end up on top of
+* each other. If you graph over a shorter period, you can see at least
+* some spread between the upper and lower bounds.
+*
+
+
+set contraction = t>=1990:07:01.and.t<=1991:03:01.or.t>=2001:03:01.and.t<=2001:11:01.or.t>=2007:12:01.and.t<=2009:06:01
+set Hamilton = t>=1957:04.and.t<=1958:04.or.t>=1973:03.and.t<=1975:01.or.t>=1979:03.and.t<=1982:03.or.t>=1990:04.and.t<=1992:02.or.t>=2005:01.and.t<2007:01.or.t>=2007:04.and.t<=2008:03
+sta hamilton
+set ham91 = t>=1990:10:01.and.t<=1992:06:01
+gra 1; # ham08
+set ham06 = t>=2005:01:01.and.t<2007:03:01
+set ham08 = t>=2007:10:01.and.t<=2008:09:01
+
+
+do j=2,n
+   do k=1,j-1
+      do t=gstart,gend
+         ewise xcorr(i)=dcccorr(j,k)(t)(i)
+         compute frac=%fractiles(xcorr,||.005,.50,.995||)
+         compute lower(j,k)(t)=frac(1)
+         compute upper(j,k)(t)=frac(3)
+         compute median(j,k)(t)=frac(2)
+      end do tme
+      graph(patterns,shading=contraction,hea="Correlations Between oil prices and the stock market",subhea="Shading=NBER Recessions",key=below, $
+		klabel=||"Dynamic Corrleations","Upper 99% CI","Lower 99%CI"||) 3 ;
+      # median(j,k) gstart gend
+      # lower(j,k) gstart gend 2
+      # upper(j,k) gstart gend 2
+   end do k
+end do j
+
+
+gra 1; # median(2,1)
+gra 1; # contraction
+gra 1; # hamilton
+
+@lagselect median(2,1)
+lin(robusterrors) median(2,1) / resids; # constant  median(2,1){1 to 13}
+@bic
+cor(qstats,span=4,number=16,dfc=%narma) resids
+@bjident resids
+
+set post = t>=2007:12:01
+set pre = t<2007:12:01
+
+stats vxo
+set sd_vxo = sqrt(%variance)
+set m_vxo = %mean
+set standvxo = (vxo - m_vxo) / sd_vxo
+tab
+gra 1; # standvxo
+
+set ddollar = 100*(log(dollar) - log(dollar{1}))
+stats ddollar
+set sd_dol = sqrt(%variance)
+set m_dol = %mean
+set standdol = (ddollar - m_dol) / sd_dol
+tab
+gra 1; # standdol
+
+stats median(2,1)
+set sd_med = sqrt(%variance)
+set m_med = %mean
+set standmed = (median(2,1) - m_med) / sd_med
+tab
+gra 1; # standmed
+
+
+
+set standvxopost = standvxo*post
+set standvxopre = standvxo*pre
+
+gra 1; # standvxopre
+
+lin(robusterrors) standmed / resids; # constant  standmed{1 to 13} standdol standvxo
+lin(robusterrors) standmed / resids; # constant  standmed{1 to 13} standdol standvxopost standvxopre
+lin(robusterrors) standmed / resids; # constant  standmed{1 to 13} standdol standvxopost standvxopre hamilton contraction
+lin(robusterrors) median(2,1) / resids; # constant  median(2,1){1 to 13} ddollar vxopost vxopre hamilton rec90 rec01 rec08
+
+lin(robusterrors) median(2,1) / resids; # constant  median(2,1){1 to 13} ddollar vxo
+lin(robusterrors) median(2,1) / resids; # constant  median(2,1){1 to 13} ddollar vxopost vxopre
+lin(robusterrors) median(2,1) / resids; # constant  median(2,1){1 to 13} ddollar vxopost vxopre hamilton contraction
+lin(robusterrors) median(2,1) / resids; # constant  median(2,1){1 to 13} ddollar vxopost vxopre hamilton rec90 rec01 rec08
+
+
+
+@dfunit(det=trend,method=aic) median(2,1)
+@ppunit(det=trend,lags=13) median(2,1)
+
+@kpss(det=trend,lags=13) median(2,1)
+
+@dfunit(det=trend,method=aic) vxo
+@ppunit(det=trend,lags=13) vxo
+
+@kpss(det=trend,lags=13) vxo
+
+@dfunit(det=trend,method=aic) dollar
+@ppunit(det=trend,lags=13) dollar
+
+@kpss(det=trend,lags=13) dollar
+
+set dc = 100*((median(2,1) - median(2,1){1})/median(2,1){1})
+set dvix = 100*((vxo - vxo{1})/vxo{1})
+set dvixpost = dvix*post
+set dvixpre = dvix*pre
+@dfunit(det=trend,method=bic) dc
+@ppunit(det=trend,lags=13) dc
+
+@kpss(det=trend,lags=13) dc
+gra 1; # dc
+gra 1; # median(2,1)
+
+
+@lagselect dc
+lin(robusterrors) DC / resids; # constant  dc{1} standdol standvxopost standvxopre
+lin(robusterrors) DC / resids; # constant  DC{1 to 2} dvix ddollar hamilton contraction
+lin(robusterrors) DC / resids; # constant  DC{1 to 2} ddollar vxo hamilton rec90 rec01 rec08
+
+
+
+
+
+
